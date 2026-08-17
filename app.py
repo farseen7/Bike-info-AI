@@ -198,33 +198,33 @@ def vector_search_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     target_entities = state.get("target_entity", [])
 
+    # If it's a short/vague query without target entities, return empty vector results
+    if len(user_query.strip()) < 4 and not target_entities:
+        return {"vector_data": []}
+
     query_vector = embedder.encode([user_query]).tolist()
     where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
     formatted_docs = []
 
     try:
-        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=3, where=where_filter)
+        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=2, where=where_filter)
         rev_docs = review_results.get("documents", [[]])[0]
         rev_metas = review_results.get("metadatas", [[]])[0]
         for doc, meta in zip(rev_docs, rev_metas):
             variant = meta.get("Variant Name", meta.get("Varient_Name", "Unknown"))
-            formatted_docs.append(f"💬 [USER REVIEW - {variant}]: {doc}")
+            formatted_docs.append(f"💬 [USER REVIEW - {variant}]: {doc[:200]}") # Cap length per doc
     except Exception:
         pass
 
     try:
-        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=3, where=where_filter)
+        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=2, where=where_filter)
         feat_docs = feature_results.get("documents", [[]])[0]
         feat_metas = feature_results.get("metadatas", [[]])[0]
         for doc, meta in zip(feat_docs, feat_metas):
             variant = meta.get("Variant Name", "Unknown")
-            formatted_docs.append(f"🛠️ [FEATURE SPEC - {variant}]: {doc}")
+            formatted_docs.append(f"🛠️ [FEATURE SPEC - {variant}]: {doc[:200]}") # Cap length per doc
     except Exception:
         pass
-
-    if not formatted_docs:
-        fallback = collection_reviews.query(query_embeddings=query_vector, n_results=4)
-        formatted_docs = fallback.get("documents", [[]])[0]
 
     return {"vector_data": formatted_docs}
 
@@ -233,13 +233,23 @@ def synthesizer_node(state: AgentState) -> AgentState:
     sql_data = state.get("sql_data", None)
     vector_data = state.get("vector_data", None)
 
-    vector_context_str = "\n".join(vector_data) if isinstance(vector_data, list) and vector_data else "No relevant reviews found."
+    # 1. Truncate SQL results to avoid massive token usage (Max 5 items)
+    if sql_data and isinstance(sql_data, list):
+        sql_context_str = json.dumps(sql_data[:5], indent=2)
+    else:
+        sql_context_str = "No database records found."
+
+    # 2. Limit vector context (Max 3 documents or first 1000 characters)
+    if vector_data and isinstance(vector_data, list):
+        vector_context_str = "\n".join(vector_data[:3])[:1000]
+    else:
+        vector_context_str = "No relevant reviews found."
 
     synthesizer_prompt = f"""
 You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
 
 SQL Data Context:
-{json.dumps(sql_data) if sql_data else "No database records found."}
+{sql_context_str}
 
 Vector Review Context:
 {vector_context_str}
@@ -247,8 +257,9 @@ Vector Review Context:
 User Query: {user_query}
 
 STRICT GUIDELINES:
-1. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
-2. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
+1. If the query is a simple greeting (e.g., "hi", "hello"), respond politely and ask how you can help with bike specs or reviews.
+2. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
+3. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
 """
 
     response = client.chat.completions.create(
@@ -258,7 +269,6 @@ STRICT GUIDELINES:
     )
 
     return {"final_response": response.choices[0].message.content}
-
 
 # --- 5. LANGGRAPH WORKFLOW ---
 
