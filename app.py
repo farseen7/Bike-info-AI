@@ -215,19 +215,20 @@ def vector_search_node(state: AgentState) -> AgentState:
 
     return {"vector_docs": formatted_docs}
 
-def synthesizer_node(state: AgentState) -> AgentState:
-    if client is None:
-        return {"final_response": "Error: Groq client not configured."}
+def synthesizer_node(state):
+    # 1. Safely extract variables from state with default fallbacks
+    user_query = state.get("user_query", "")
+    sql_data = state.get("sql_data", None)
+    
+    # Check for state keys (adjust 'vector_data' if your graph state uses 'vector_results')
+    vector_data = state.get("vector_data") or state.get("vector_results") or ""
 
-    user_query = state["user_query"]
-    sql_data = state.get("sql_data")
-    vector_docs = state.get("vector_docs")
-
-    prompt = synthesizer_prompt = f"""
+    # 2. Format the prompt cleanly
+    synthesizer_prompt = f"""
 You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
 
 SQL Data Context:
-{sql_data if sql_data else "No database records found."}
+{sql_data if sql_data is not None else "No database records found."}
 
 Vector Review Context:
 {vector_data if vector_data else "No relevant reviews found."}
@@ -240,13 +241,12 @@ STRICT GUIDELINES:
 """
 
     response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": synthesizer_prompt}],
+        temperature=0.0
     )
 
     return {"final_response": response.choices[0].message.content}
-
 
 # --- 5. LANGGRAPH WORKFLOW ---
 
