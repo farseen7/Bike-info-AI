@@ -94,7 +94,6 @@ def check_sql_status(state: AgentState):
     sql_error = state.get("sql_error")
     retry_count = state.get("retry_count", 0)
     if sql_error and retry_count < 3:
-        st.write(f"⚠️ Retrying SQL Node (Attempt {retry_count}/3)")
         return "sql_developer"
     return "synthesizer"
 
