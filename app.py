@@ -105,18 +105,27 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     user_query = state["user_query"]
 
-    prompt = supervisor_prompt = """
-You are a routing supervisor. Analyze the user query and return ONLY a valid JSON object matching this schema exactly:
+    prompt = """
+You are a routing supervisor for a bike information assistant. Analyze the user query and return ONLY a JSON object matching this schema:
 
 {
   "route": "SQL" | "VECTOR" | "HYBRID",
-  "target_entity": ["extracted model or company names"],
-  "reasoning": "brief explanation for routing choice"
+  "target_entity": ["bike model or brand names"],
+  "reasoning": "explanation for routing choice"
 }
 
-STRICT CONSTRAINTS:
-1. The "route" field MUST be exactly one of these three strings: "SQL", "VECTOR", or "HYBRID".
-2. DO NOT output "UNKNOWN", "OTHER", or any other string for the route field. If the query is unclear or unhandled, default to "SQL".
+ROUTING RULES:
+1. Choose "SQL" ONLY if the query asks purely for structured specifications, prices, mileage, or technical features.
+2. Choose "VECTOR" ONLY if the query asks purely for user reviews, opinions, pros/cons, or feedback.
+3. Choose "HYBRID" if the query asks for BOTH features/specs AND reviews/opinions together, OR if it asks a general question comparing both aspects.
+
+EXAMPLES:
+- "Honda CB350 features" -> "SQL"
+- "Honda CB350 review" -> "VECTOR"
+- "Honda CB350 features and review" -> "HYBRID"
+
+IMPORTANT:
+- Output "route" as strictly one of: "SQL", "VECTOR", or "HYBRID".
 """
 
     chat_completion = client.chat.completions.create(
