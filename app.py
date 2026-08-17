@@ -118,7 +118,7 @@ Return JSON adhering strictly to RouteResponse schema.
 
     chat_completion = client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         response_format={"type": "json_object"},
         temperature=0.0,
     )
@@ -169,7 +169,7 @@ ENTITIES: {target_entities}
 """
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0
     )
@@ -238,7 +238,7 @@ Combine specifications and subjective feedback cleanly. Do not expose internal e
 """
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
