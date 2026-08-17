@@ -226,23 +226,26 @@ def vector_search_node(state: AgentState) -> AgentState:
 
 def synthesizer_node(state: AgentState) -> AgentState:
     user_query = state.get("user_query", "")
+    route = state.get("route", "")
     sql_data = state.get("sql_data", None)
     vector_data = state.get("vector_data", None)
 
-    # 1. Truncate SQL results to avoid massive token usage (Max 5 items)
+    # Context truncation to manage token limits
     if sql_data and isinstance(sql_data, list):
         sql_context_str = json.dumps(sql_data[:5], indent=2)
     else:
         sql_context_str = "No database records found."
 
-    # 2. Limit vector context (Max 3 documents or first 1000 characters)
     if vector_data and isinstance(vector_data, list):
         vector_context_str = "\n".join(vector_data[:3])[:1000]
     else:
         vector_context_str = "No relevant reviews found."
 
     synthesizer_prompt = f"""
-You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
+You are a specialized Bike Information AI Assistant. You CAN ONLY answer questions related to motorcycles, scooters, bike specifications, features, mileage, prices, and user reviews.
+
+Route Type: {route}
+User Query: {user_query}
 
 SQL Data Context:
 {sql_context_str}
@@ -250,13 +253,24 @@ SQL Data Context:
 Vector Review Context:
 {vector_context_str}
 
-User Query: {user_query}
+STRICT RESPONSE RULES:
+1. OFF-TOPIC & SMALL TALK REJECTION: If the user query is unrelated to bikes (e.g., general knowledge, coding, math, personal questions, chit-chat like "how are you"), respond strictly with:
+   "I can only answer bike-related questions. Please ask me about bike specifications, features, prices, mileage, or user reviews!"
 
-STRICT GUIDELINES:
-1. If the query is a simple greeting (e.g., "hi", "hello"), respond politely and ask how you can help with bike specs or reviews.
-2. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
-3. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
+2. GREETINGS: If the user says a basic greeting like "hi" or "hello", greet them back briefly in one sentence and inform them that you can help with bike-related queries.
+
+3. DATA-BASED ANSWERS: If the query is about bikes and relevant data exists in the context above, construct a clear, helpful answer using ONLY that data.
+
+4. MISSING DATA: If the query is bike-related but no records match in the context, state clearly that you don't have records for that specific bike model in your database.
 """
+
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[{"role": "user", "content": synthesizer_prompt}],
+        temperature=0.0
+    )
+
+    return {"final_response": response.choices[0].message.content}
 
     response = client.chat.completions.create(
         model="openai/gpt-oss-20b",
