@@ -142,9 +142,16 @@ ENTITY EXTRACTION & NORMALIZATION:
         "sql_error": None
     }
 
+import re
+
 def sql_developer_node(state: AgentState) -> AgentState:
     if con is None:
-        return {"sql_query": None, "sql_data": [], "sql_error": "No DuckDB connection", "retry_count": state.get("retry_count", 0) + 1}
+        return {
+            "sql_query": None, 
+            "sql_data": [], 
+            "sql_error": "No DuckDB connection", 
+            "retry_count": state.get("retry_count", 0) + 1
+        }
 
     user_query = state["user_query"]
     target_entities = state.get("target_entity", [])
@@ -161,18 +168,31 @@ def sql_developer_node(state: AgentState) -> AgentState:
     """
 
     if sql_error:
-        prompt = f"Fix DuckDB SQL error.\nSCHEMA:\n{schema_info}\nFAILED QUERY: {previous_sql}\nERROR: {sql_error}\nQUESTION: {user_query}\nReturn ONLY SQL code block."
-    else:
-        prompt = f"""Write DuckDB SQL query.
+        prompt = f"""Fix DuckDB SQL error.
 SCHEMA:
 {schema_info}
+FAILED QUERY: {previous_sql}
+ERROR: {sql_error}
+QUESTION: {user_query}
+
 RULES:
-1. Double quote column names with spaces (e.g. "Variant Name").
-2. String match with ILIKE.
-Return ONLY raw SQL inside ```sql ... ``` block.
+1. Double quote column names with spaces.
+2. Return ONLY valid executable SQL inside ```sql ... ``` block.
+"""
+    else:
+        prompt = f"""Write a valid DuckDB SQL query to answer the user question.
+
+SCHEMA:
+{schema_info}
+
+STRICT GENERATION RULES:
+1. Double-quote column names that contain spaces (e.g., "Variant Name", "On-road prize").
+2. ALWAYS use soft fuzzy matching for model/brand names using split wildcards (e.g., WHERE "Variant Name" ILIKE '%CB%350%' OR "Variant Name" ILIKE '%Honda%'). NEVER use exact equality (=).
+3. Always append `LIMIT 10` to avoid returning excessive rows.
+4. Return ONLY raw SQL wrapped inside a ```sql ... ``` code block.
 
 QUESTION: "{user_query}"
-ENTITIES: {target_entities}
+ENTITIES TO MATCH: {target_entities}
 """
 
     response = client.chat.completions.create(
@@ -182,48 +202,57 @@ ENTITIES: {target_entities}
     )
 
     raw_text = response.choices[0].message.content
-    sql_query = raw_text.split("```sql")[1].split("```")[0].strip() if "```sql" in raw_text else raw_text.strip()
+
+    # Safe SQL Extraction using Regex
+    sql_match = re.search(r"```sql\s*(.*?)\s*```", raw_text, re.DOTALL)
+    if sql_match:
+        sql_query = sql_match.group(1).strip()
+    else:
+        sql_query = raw_text.replace("```", "").strip()
 
     try:
         query_results = con.execute(sql_query).df().to_dict(orient="records")
-        return {"sql_query": sql_query, "sql_data": query_results, "sql_error": None, "retry_count": retry_count}
+        return {
+            "sql_query": sql_query, 
+            "sql_data": query_results, 
+            "sql_error": None, 
+            "retry_count": retry_count
+        }
     except Exception as e:
-        return {"sql_query": sql_query, "sql_data": None, "sql_error": str(e), "retry_count": retry_count + 1}
-
+        return {
+            "sql_query": sql_query, 
+            "sql_data": None, 
+            "sql_error": str(e), 
+            "retry_count": retry_count + 1
+        }
 def vector_search_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     target_entities = state.get("target_entity", [])
-
-    # If it's a short/vague query without target entities, return empty vector results
-    if len(user_query.strip()) < 4 and not target_entities:
-        return {"vector_data": []}
 
     query_vector = embedder.encode([user_query]).tolist()
     where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
     formatted_docs = []
 
+    # Attempt 1: Filtered query
     try:
-        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=2, where=where_filter)
+        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=3, where=where_filter)
         rev_docs = review_results.get("documents", [[]])[0]
-        rev_metas = review_results.get("metadatas", [[]])[0]
-        for doc, meta in zip(rev_docs, rev_metas):
-            variant = meta.get("Variant Name", meta.get("Varient_Name", "Unknown"))
-            formatted_docs.append(f"💬 [USER REVIEW - {variant}]: {doc[:200]}") # Cap length per doc
+        for doc in rev_docs:
+            formatted_docs.append(f"💬 [REVIEW]: {doc[:200]}")
     except Exception:
         pass
 
-    try:
-        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=2, where=where_filter)
-        feat_docs = feature_results.get("documents", [[]])[0]
-        feat_metas = feature_results.get("metadatas", [[]])[0]
-        for doc, meta in zip(feat_docs, feat_metas):
-            variant = meta.get("Variant Name", "Unknown")
-            formatted_docs.append(f"🛠️ [FEATURE SPEC - {variant}]: {doc[:200]}") # Cap length per doc
-    except Exception:
-        pass
+    # Attempt 2: Fallback to semantic vector search if strict filter yields 0 results
+    if not formatted_docs:
+        try:
+            fallback = collection_reviews.query(query_embeddings=query_vector, n_results=3)
+            rev_docs = fallback.get("documents", [[]])[0]
+            for doc in rev_docs:
+                formatted_docs.append(f"💬 [REVIEW]: {doc[:200]}")
+        except Exception:
+            pass
 
     return {"vector_data": formatted_docs}
-
 def synthesizer_node(state: AgentState) -> AgentState:
     user_query = state.get("user_query", "")
     route = state.get("route", "")
