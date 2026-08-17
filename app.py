@@ -144,6 +144,8 @@ ENTITY EXTRACTION & NORMALIZATION:
 
 import re
 
+import re
+
 def sql_developer_node(state: AgentState) -> AgentState:
     if con is None:
         return {
@@ -164,35 +166,24 @@ def sql_developer_node(state: AgentState) -> AgentState:
     Columns: "Variant Name", "Company Name", "On-road prize", "Engine Type", "Displacement", "Max Torque", "No. of Cylinders", "Cooling System", "City Mileage", "Highway Mileage", "Body Type", "0-100 Kmph (ec)", "Peak Power", "Transmission"
 
     Table 2: bikes_reviews
-    Columns: Varient_Name (Note exact spelling with 'e'), Average_stars, Review_title, User_rating, Review_description
+    Columns: Varient_Name, Average_stars, Review_title, User_rating, Review_description
     """
 
     if sql_error:
-        prompt = f"""Fix DuckDB SQL error.
+        prompt = f"Fix DuckDB SQL error.\nSCHEMA:\n{schema_info}\nFAILED QUERY: {previous_sql}\nERROR: {sql_error}\nQUESTION: {user_query}\nReturn ONLY executable SQL inside ```sql ... ``` block."
+    else:
+        prompt = f"""Write DuckDB SQL query.
 SCHEMA:
 {schema_info}
-FAILED QUERY: {previous_sql}
-ERROR: {sql_error}
-QUESTION: {user_query}
 
 RULES:
-1. Double quote column names with spaces.
-2. Return ONLY valid executable SQL inside ```sql ... ``` block.
-"""
-    else:
-        prompt = f"""Write a valid DuckDB SQL query to answer the user question.
-
-SCHEMA:
-{schema_info}
-
-STRICT GENERATION RULES:
-1. Double-quote column names that contain spaces (e.g., "Variant Name", "On-road prize").
-2. ALWAYS use soft fuzzy matching for model/brand names using split wildcards (e.g., WHERE "Variant Name" ILIKE '%CB%350%' OR "Variant Name" ILIKE '%Honda%'). NEVER use exact equality (=).
-3. Always append `LIMIT 10` to avoid returning excessive rows.
-4. Return ONLY raw SQL wrapped inside a ```sql ... ``` code block.
+1. Double quote column names with spaces (e.g. "Variant Name").
+2. ALWAYS use loose wildcard matching for bike models using ILIKE with % between letters and numbers. Example: for 'CB350', write `WHERE "Variant Name" ILIKE '%CB%350%' OR "Variant Name" ILIKE '%Honda%'`.
+3. Include `LIMIT 10`.
+Return ONLY raw SQL inside ```sql ... ``` block.
 
 QUESTION: "{user_query}"
-ENTITIES TO MATCH: {target_entities}
+TARGET ENTITIES: {target_entities}
 """
 
     response = client.chat.completions.create(
@@ -202,57 +193,58 @@ ENTITIES TO MATCH: {target_entities}
     )
 
     raw_text = response.choices[0].message.content
-
-    # Safe SQL Extraction using Regex
     sql_match = re.search(r"```sql\s*(.*?)\s*```", raw_text, re.DOTALL)
-    if sql_match:
-        sql_query = sql_match.group(1).strip()
-    else:
-        sql_query = raw_text.replace("```", "").strip()
+    sql_query = sql_match.group(1).strip() if sql_match else raw_text.replace("```", "").strip()
 
     try:
         query_results = con.execute(sql_query).df().to_dict(orient="records")
-        return {
-            "sql_query": sql_query, 
-            "sql_data": query_results, 
-            "sql_error": None, 
-            "retry_count": retry_count
-        }
+        
+        # FALLBACK: If query succeeded but returned 0 rows, run a broad keyword search
+        if not query_results and target_entities:
+            clean_entity = re.sub(r'[^a-zA-Z0-9]', '', target_entities[0])
+            fallback_pattern = "%" + "%".join(list(clean_entity)) + "%"
+            fallback_sql = f'SELECT * FROM bike_features WHERE "Variant Name" ILIKE \'{fallback_pattern}\' LIMIT 5;'
+            query_results = con.execute(fallback_sql).df().to_dict(orient="records")
+            sql_query = fallback_sql
+
+        return {"sql_query": sql_query, "sql_data": query_results, "sql_error": None, "retry_count": retry_count}
     except Exception as e:
-        return {
-            "sql_query": sql_query, 
-            "sql_data": None, 
-            "sql_error": str(e), 
-            "retry_count": retry_count + 1
-        }
+        return {"sql_query": sql_query, "sql_data": None, "sql_error": str(e), "retry_count": retry_count + 1}
+
+        
 def vector_search_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
     target_entities = state.get("target_entity", [])
 
+    if len(user_query.strip()) < 3:
+        return {"vector_data": []}
+
     query_vector = embedder.encode([user_query]).tolist()
-    where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
     formatted_docs = []
 
-    # Attempt 1: Filtered query
+    # Attempt 1: Try query with metadata filter
+    where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
+    
     try:
         review_results = collection_reviews.query(query_embeddings=query_vector, n_results=3, where=where_filter)
         rev_docs = review_results.get("documents", [[]])[0]
         for doc in rev_docs:
-            formatted_docs.append(f"💬 [REVIEW]: {doc[:200]}")
+            formatted_docs.append(f"💬 [REVIEW]: {doc[:250]}")
     except Exception:
         pass
 
-    # Attempt 2: Fallback to semantic vector search if strict filter yields 0 results
+    # Attempt 2: If metadata filter yielded no results, fall back to pure semantic search
     if not formatted_docs:
         try:
-            fallback = collection_reviews.query(query_embeddings=query_vector, n_results=3)
-            rev_docs = fallback.get("documents", [[]])[0]
+            fallback_reviews = collection_reviews.query(query_embeddings=query_vector, n_results=3)
+            rev_docs = fallback_reviews.get("documents", [[]])[0]
             for doc in rev_docs:
-                formatted_docs.append(f"💬 [REVIEW]: {doc[:200]}")
+                formatted_docs.append(f"💬 [REVIEW]: {doc[:250]}")
         except Exception:
             pass
 
     return {"vector_data": formatted_docs}
+    
 def synthesizer_node(state: AgentState) -> AgentState:
     user_query = state.get("user_query", "")
     route = state.get("route", "")
