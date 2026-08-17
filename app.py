@@ -4,12 +4,11 @@ import json
 import duckdb
 import chromadb
 from typing import TypedDict, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, AliasChoices
 from typing_extensions import Literal
 from groq import Groq
 from langgraph.graph import StateGraph, START, END
 from sentence_transformers import SentenceTransformer
-
 
 class AgentState(TypedDict):
     user_query: str
@@ -24,6 +23,7 @@ class AgentState(TypedDict):
 
 class RouteResponse(BaseModel):
     next_step: Literal["SQL", "VECTOR", "HYBRID"] = Field(
+        validation_alias=AliasChoices("next_step", "route"),
         description="The routing path based on query intent."
     )
     target_entity: List[str] = Field(
@@ -31,6 +31,7 @@ class RouteResponse(BaseModel):
         description="Extracted bike model or company names from query."
     )
     reasoning: str = Field(
+        default="No reasoning provided.",
         description="Brief explanation of why this route was selected."
     )
 
