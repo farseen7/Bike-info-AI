@@ -244,15 +244,17 @@ def vector_search_node(state: AgentState) -> AgentState:
 
     return {"vector_data": formatted_docs}
     
+import json
+
 def synthesizer_node(state: AgentState) -> AgentState:
     user_query = state.get("user_query", "")
     route = state.get("route", "")
     sql_data = state.get("sql_data", None)
     vector_data = state.get("vector_data", None)
 
-    # Context truncation to manage token limits
+    # Convert DuckDB types (Timestamp, Decimal, Date) safely using default=str
     if sql_data and isinstance(sql_data, list):
-        sql_context_str = json.dumps(sql_data[:5], indent=2)
+        sql_context_str = json.dumps(sql_data[:5], indent=2, default=str)
     else:
         sql_context_str = "No database records found."
 
@@ -274,7 +276,7 @@ Vector Review Context:
 {vector_context_str}
 
 STRICT RESPONSE RULES:
-1. OFF-TOPIC & SMALL TALK REJECTION: If the user query is unrelated to bikes (e.g., general knowledge, coding, math, personal questions, chit-chat like "how are you"), respond strictly with:
+1. OFF-TOPIC & SMALL TALK REJECTION: If the user query is unrelated to bikes (e.g., general knowledge, coding, math, personal questions, schedules), respond strictly with:
    "I can only answer bike-related questions. Please ask me about bike specifications, features, prices, mileage, or user reviews!"
 
 2. GREETINGS: If the user says a basic greeting like "hi" or "hello", greet them back briefly in one sentence and inform them that you can help with bike-related queries.
@@ -291,15 +293,6 @@ STRICT RESPONSE RULES:
     )
 
     return {"final_response": response.choices[0].message.content}
-
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[{"role": "user", "content": synthesizer_prompt}],
-        temperature=0.0
-    )
-
-    return {"final_response": response.choices[0].message.content}
-
 # --- 5. LANGGRAPH WORKFLOW ---
 
 workflow = StateGraph(AgentState)
