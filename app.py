@@ -186,4 +186,134 @@ ENTITIES: {target_entities}
     )
 
     raw_text = response.choices[0].message.content
-    sql_query = raw_text.split("```sql")[1].split("
+    sql_query = raw_text.split("```sql")[1].split("```")[0].strip() if "```sql" in raw_text else raw_text.strip()
+
+    try:
+        query_results = con.execute(sql_query).df().to_dict(orient="records")
+        return {"sql_query": sql_query, "sql_data": query_results, "sql_error": None, "retry_count": retry_count}
+    except Exception as e:
+        return {"sql_query": sql_query, "sql_data": None, "sql_error": str(e), "retry_count": retry_count + 1}
+
+def vector_search_node(state: AgentState) -> AgentState:
+    user_query = state["user_query"]
+    target_entities = state.get("target_entity", [])
+
+    query_vector = embedder.encode([user_query]).tolist()
+    where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
+    formatted_docs = []
+
+    try:
+        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=3, where=where_filter)
+        rev_docs = review_results.get("documents", [[]])[0]
+        rev_metas = review_results.get("metadatas", [[]])[0]
+        for doc, meta in zip(rev_docs, rev_metas):
+            variant = meta.get("Variant Name", meta.get("Varient_Name", "Unknown"))
+            formatted_docs.append(f"💬 [USER REVIEW - {variant}]: {doc}")
+    except Exception:
+        pass
+
+    try:
+        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=3, where=where_filter)
+        feat_docs = feature_results.get("documents", [[]])[0]
+        feat_metas = feature_results.get("metadatas", [[]])[0]
+        for doc, meta in zip(feat_docs, feat_metas):
+            variant = meta.get("Variant Name", "Unknown")
+            formatted_docs.append(f"🛠️ [FEATURE SPEC - {variant}]: {doc}")
+    except Exception:
+        pass
+
+    if not formatted_docs:
+        fallback = collection_reviews.query(query_embeddings=query_vector, n_results=4)
+        formatted_docs = fallback.get("documents", [[]])[0]
+
+    return {"vector_data": formatted_docs}
+
+def synthesizer_node(state: AgentState) -> AgentState:
+    user_query = state.get("user_query", "")
+    sql_data = state.get("sql_data", None)
+    vector_data = state.get("vector_data", None)
+
+    vector_context_str = "\n".join(vector_data) if isinstance(vector_data, list) and vector_data else "No relevant reviews found."
+
+    synthesizer_prompt = f"""
+You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
+
+SQL Data Context:
+{json.dumps(sql_data) if sql_data else "No database records found."}
+
+Vector Review Context:
+{vector_context_str}
+
+User Query: {user_query}
+
+STRICT GUIDELINES:
+1. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
+2. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
+"""
+
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[{"role": "user", "content": synthesizer_prompt}],
+        temperature=0.0
+    )
+
+    return {"final_response": response.choices[0].message.content}
+
+
+# --- 5. LANGGRAPH WORKFLOW ---
+
+workflow = StateGraph(AgentState)
+workflow.add_node("supervisor", supervisor_node)
+workflow.add_node("sql_developer", sql_developer_node)
+workflow.add_node("vector_search", vector_search_node)
+workflow.add_node("synthesizer", synthesizer_node)
+
+workflow.add_edge(START, "supervisor")
+workflow.add_conditional_edges("supervisor", route_decision, ["sql_developer", "vector_search"])
+workflow.add_conditional_edges("sql_developer", check_sql_status, {"sql_developer": "sql_developer", "synthesizer": "synthesizer"})
+workflow.add_edge("vector_search", "synthesizer")
+workflow.add_edge("synthesizer", END)
+
+app = workflow.compile()
+
+
+# --- 6. STREAMLIT INTERFACE ---
+
+st.set_page_config(page_title="Bike AI Assistant", page_icon="🏍️", layout="wide")
+st.title("🏍️ Multi-Agent Bike Assistant")
+
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    key_input = st.text_input("Groq API Key", type="password", value=st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", "")))
+    if key_input:
+        os.environ["GROQ_API_KEY"] = key_input
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+if prompt := st.chat_input("Ask a question about bike specs or reviews..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.status("🤖 Executing Agents...", expanded=True) as status:
+            if client is None and os.environ.get("GROQ_API_KEY"):
+                get_groq_client.clear()
+                client = get_groq_client()
+
+            if client is None:
+                st.error("GROQ_API_KEY missing.")
+                status.update(label="Failed", state="error", expanded=False)
+                res_text = "Please enter your Groq API Key in the sidebar or Streamlit secrets."
+            else:
+                out = app.invoke({"user_query": prompt})
+                status.update(label="Complete", state="complete", expanded=False)
+                res_text = out.get("final_response", "No response generated.")
+
+        st.markdown(res_text)
+        st.session_state.messages.append({"role": "assistant", "content": res_text})
