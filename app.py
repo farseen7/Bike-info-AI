@@ -107,7 +107,7 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     user_query = state["user_query"]
 
-    prompt = """
+    prompt= """
 You are a routing supervisor for a bike information assistant. Analyze the user query and return ONLY a JSON object matching this schema:
 
 {
@@ -117,17 +117,13 @@ You are a routing supervisor for a bike information assistant. Analyze the user 
 }
 
 ROUTING RULES:
-1. Choose "SQL" ONLY if the query asks purely for structured specifications, prices, mileage, or technical features.
-2. Choose "VECTOR" ONLY if the query asks purely for user reviews, opinions, pros/cons, or feedback.
-3. Choose "HYBRID" if the query asks for BOTH features/specs AND reviews/opinions together, OR if it asks a general question comparing both aspects.
+1. Choose "SQL" for structured specs, prices, mileage, features.
+2. Choose "VECTOR" for user reviews, opinions, pros/cons.
+3. Choose "HYBRID" for queries combining both specs and reviews.
 
-EXAMPLES:
-- "Honda CB350 features" -> "SQL"
-- "Honda CB350 review" -> "VECTOR"
-- "Honda CB350 features and review" -> "HYBRID"
-
-IMPORTANT:
-- Output "route" as strictly one of: "SQL", "VECTOR", or "HYBRID".
+ENTITY EXTRACTION & NORMALIZATION:
+- Correct common bike name misnomers/typos to standard names if obvious (e.g., "CBR 350" or "CBR350" -> "CB350" / "Honda CB350").
+- If unsure, include both the original query term and the closest match in target_entity.
 """
 
     chat_completion = client.chat.completions.create(
