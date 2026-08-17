@@ -126,9 +126,6 @@ Return JSON adhering strictly to RouteResponse schema.
 
     decision = RouteResponse.model_validate_json(chat_completion.choices[0].message.content)
 
-    st.write(f"➡️ **Route:** `{decision.next_step}`")
-    st.write(f"🎯 **Target Entities:** `{decision.target_entity}`")
-
     return {
         "route": decision.next_step,
         "target_entity": decision.target_entity,
@@ -177,7 +174,6 @@ ENTITIES: {target_entities}
 
     raw_text = response.choices[0].message.content
     sql_query = raw_text.split("```sql")[1].split("```")[0].strip() if "```sql" in raw_text else raw_text.strip()
-    st.code(sql_query, language="sql")
 
     try:
         query_results = con.execute(sql_query).df().to_dict(orient="records")
@@ -227,15 +223,20 @@ def synthesizer_node(state: AgentState) -> AgentState:
     sql_data = state.get("sql_data")
     vector_docs = state.get("vector_docs")
 
-    prompt = f"""Synthesize SQL and Vector Search insights for the user query: "{user_query}"
+    prompt = synthesizer_prompt = f"""
+You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
 
-SQL DATA:
-{json.dumps(sql_data, indent=2) if sql_data else "None"}
+SQL Data Context:
+{sql_data if sql_data else "No database records found."}
 
-VECTOR DOCS:
-{json.dumps(vector_docs, indent=2) if vector_docs else "None"}
+Vector Review Context:
+{vector_data if vector_data else "No relevant reviews found."}
 
-Combine specifications and subjective feedback cleanly. Do not expose internal execution details.
+User Query: {user_query}
+
+STRICT GUIDELINES:
+1. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
+2. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
 """
 
     response = client.chat.completions.create(
