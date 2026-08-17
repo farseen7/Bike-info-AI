@@ -105,16 +105,18 @@ def supervisor_node(state: AgentState) -> AgentState:
 
     user_query = state["user_query"]
 
-    prompt = f"""You are the Supervisor Agent for a Bike Database.
+    prompt = supervisor_prompt = """
+You are a routing supervisor. Analyze the user query and return ONLY a valid JSON object matching this schema exactly:
 
-STEP 1: Identify and extract ALL bike brand names and model names from the query into `target_entity`. Return empty list `[]` if none.
-STEP 2: Classify route:
-- "SQL": Counts, price filters, mileage, exact numeric specs.
-- "VECTOR": Reviews, subjective comfort, riding experience.
-- "HYBRID": Both specs and qualitative reviews requested.
+{
+  "route": "SQL" | "VECTOR" | "HYBRID",
+  "target_entity": ["extracted model or company names"],
+  "reasoning": "brief explanation for routing choice"
+}
 
-USER QUERY: "{user_query}"
-Return JSON adhering strictly to RouteResponse schema.
+STRICT CONSTRAINTS:
+1. The "route" field MUST be exactly one of these three strings: "SQL", "VECTOR", or "HYBRID".
+2. DO NOT output "UNKNOWN", "OTHER", or any other string for the route field. If the query is unclear or unhandled, default to "SQL".
 """
 
     chat_completion = client.chat.completions.create(
