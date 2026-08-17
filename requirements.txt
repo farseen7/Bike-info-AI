@@ -4,3 +4,4 @@ duckdb
 chromadb
 langgraph
 pydantic
+sentence_transformers
