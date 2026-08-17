@@ -10,15 +10,13 @@ from groq import Groq
 from langgraph.graph import StateGraph, START, END
 from sentence_transformers import SentenceTransformer
 
-# --- 1. STATE & PYDANTIC DEFINITIONS ---
-
 class AgentState(TypedDict):
     user_query: str
     route: str
     target_entity: List[str]
     sql_query: Optional[str]
     sql_data: Optional[List[dict]]
-    vector_docs: Optional[List[str]]  # Fixed state key
+    vector_docs: Optional[List[str]]
     sql_error: Optional[str]
     retry_count: int
     final_response: Optional[str]
@@ -94,6 +92,7 @@ def check_sql_status(state: AgentState):
     sql_error = state.get("sql_error")
     retry_count = state.get("retry_count", 0)
     if sql_error and retry_count < 3:
+        st.write(f"⚠️ Retrying SQL Node (Attempt {retry_count + 1}/3)")
         return "sql_developer"
     return "synthesizer"
 
@@ -102,18 +101,18 @@ def check_sql_status(state: AgentState):
 
 def supervisor_node(state: AgentState) -> AgentState:
     if client is None:
-        return {"route": "HYBRID", "target_entity": [], "retry_count": 0, "sql_error": None}
+        return {"route": "VECTOR", "target_entity": [], "retry_count": 0, "sql_error": None}
 
     user_query = state["user_query"]
 
-    prompt = f"""
+    prompt = """
 You are a routing supervisor for a bike information assistant. Analyze the user query and return ONLY a JSON object matching this schema:
 
-{{
+{
   "route": "SQL" | "VECTOR" | "HYBRID",
   "target_entity": ["bike model or brand names"],
   "reasoning": "explanation for routing choice"
-}}
+}
 
 ROUTING RULES:
 1. Choose "SQL" ONLY if the query asks purely for structured specifications, prices, mileage, or technical features.
@@ -125,7 +124,8 @@ EXAMPLES:
 - "Honda CB350 review" -> "VECTOR"
 - "Honda CB350 features and review" -> "HYBRID"
 
-QUESTION: "{user_query}"
+IMPORTANT:
+- Output "route" as strictly one of: "SQL", "VECTOR", or "HYBRID".
 """
 
     chat_completion = client.chat.completions.create(
@@ -170,7 +170,7 @@ SCHEMA:
 {schema_info}
 RULES:
 1. Double quote column names with spaces (e.g. "Variant Name").
-2. Match variant or company names flexibly using wildcards with ILIKE (e.g. "Variant Name" ILIKE '%cb350%' OR "Variant Name" ILIKE '%honda%'). Do NOT perform exact matches.
+2. String match with ILIKE.
 Return ONLY raw SQL inside ```sql ... ``` block.
 
 QUESTION: "{user_query}"
@@ -194,25 +194,24 @@ ENTITIES: {target_entities}
 
 def vector_search_node(state: AgentState) -> AgentState:
     user_query = state["user_query"]
+    target_entities = state.get("target_entity", [])
 
-    # Use pure semantic similarity search with embeddings across user query
     query_vector = embedder.encode([user_query]).tolist()
+    where_filter = {"Variant Name": {"$in": target_entities}} if target_entities else None
     formatted_docs = []
 
-    # Query reviews collection
     try:
-        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=4)
+        review_results = collection_reviews.query(query_embeddings=query_vector, n_results=3, where=where_filter)
         rev_docs = review_results.get("documents", [[]])[0]
         rev_metas = review_results.get("metadatas", [[]])[0]
         for doc, meta in zip(rev_docs, rev_metas):
-            variant = meta.get("Variant Name", meta.get("Varient_Name", "Unknown"))
+            variant = meta.get("Variant Name", "Unknown")
             formatted_docs.append(f"💬 [USER REVIEW - {variant}]: {doc}")
     except Exception:
         pass
 
-    # Query features collection
     try:
-        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=4)
+        feature_results = collection_feature.query(query_embeddings=query_vector, n_results=3, where=where_filter)
         feat_docs = feature_results.get("documents", [[]])[0]
         feat_metas = feature_results.get("metadatas", [[]])[0]
         for doc, meta in zip(feat_docs, feat_metas):
@@ -221,30 +220,34 @@ def vector_search_node(state: AgentState) -> AgentState:
     except Exception:
         pass
 
+    if not formatted_docs:
+        fallback = collection_reviews.query(query_embeddings=query_vector, n_results=4)
+        formatted_docs = fallback.get("documents", [[]])[0]
+
     return {"vector_docs": formatted_docs}
 
-def synthesizer_node(state: AgentState) -> AgentState:
+def synthesizer_node(state):
+    # 1. Safely extract variables from state with default fallbacks
     user_query = state.get("user_query", "")
     sql_data = state.get("sql_data", None)
     
-    # 1. Unified extraction matching AgentState key
-    vector_docs = state.get("vector_docs") or []
-    vector_data_str = "\n".join(vector_docs) if vector_docs else "No relevant reviews found."
+    # Check for state keys (adjust 'vector_data' if your graph state uses 'vector_results')
+    vector_data = state.get("vector_data") or state.get("vector_results") or ""
 
-    # 2. Format synthesizer context
+    # 2. Format the prompt cleanly
     synthesizer_prompt = f"""
 You are a factual bike assistant. Answer the user prompt strictly using ONLY the provided context below.
 
 SQL Data Context:
-{sql_data if sql_data else "No database records found."}
+{sql_data if sql_data is not None else "No database records found."}
 
 Vector Review Context:
-{vector_data_str}
+{vector_data if vector_data else "No relevant reviews found."}
 
 User Query: {user_query}
 
 STRICT GUIDELINES:
-1. If both contexts are empty or contain no relevant data about the requested bike, state: "I'm sorry, but I don't have enough data in my records to answer that question."
+1. If the context is empty, null, or does not contain sufficient details to answer the query, state: "I'm sorry, but I don't have enough data in my records to answer that question."
 2. Do NOT guess, fabricate, or rely on pre-trained external knowledge.
 """
 
